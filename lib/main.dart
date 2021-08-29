@@ -1,31 +1,31 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
-import 'package:flutter/scheduler.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'package:wakelock/wakelock.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:audio_session/audio_session.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_cache/just_audio_cache.dart';
 import 'package:just_audio_background/just_audio_background.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 import 'package:rxdart/rxdart.dart';
 import 'common.dart';
 
 Future<void> main() async {
 WidgetsFlutterBinding.ensureInitialized();
-  await JustAudioBackground.init(
+JustAudioBackground.init(
     androidNotificationChannelId: 'com.ryanheise.bg_demo.channel.audio',
     androidNotificationChannelName: 'Audio playback',
     androidNotificationOngoing: true,
   );
+//await MobileAds.instance.initialize();
 runApp(MyApp());
 }
 
+const int maxFailedLoadAttempts = 3;
 class MyApp extends StatefulWidget {
 const MyApp({Key? key}) : super(key: key);
 
@@ -34,6 +34,18 @@ const MyApp({Key? key}) : super(key: key);
 }
 
 class _MyAppState extends State<MyApp> {
+  static final AdRequest request = AdRequest(
+    keywords: <String>['foo', 'bar'],
+    contentUrl: 'http://foo.com/bar.html',
+    nonPersonalizedAds: true,
+  );
+InterstitialAd? _interstitialAd;
+int _numInterstitialLoadAttempts = 0;
+  BannerAd? _anchoredBanner;
+  bool _loadingAnchoredBanner = false;
+bool willPlay=false;
+bool appStarting=true;
+
   dynamic _data;
   var maxTrack = 0;
 var position=0;
@@ -61,34 +73,112 @@ var position=0;
     });
 _player.dynamicSet(url: url);
   }
+  Future<void> _createAnchoredBanner(BuildContext context) async {
+    final AnchoredAdaptiveBannerAdSize? size =
+        await AdSize.getAnchoredAdaptiveBannerAdSize(
+      Orientation.portrait,
+      MediaQuery.of(context).size.width.truncate(),
+    );
 
-  showToast(String message) {
-    Fluttertoast.showToast(
-        msg: message,
-        toastLength: Toast.LENGTH_LONG,
-        gravity: ToastGravity.CENTER,
-        timeInSecForIosWeb: 1,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-        fontSize: 16.0);
+    if (size == null) {
+      print('Unable to get height of anchored banner.');
+      return;
+    }
+
+    final BannerAd banner = BannerAd(
+      size: size,
+      request: request,
+      adUnitId: Platform.isAndroid
+          ? 'ca-app-pub-8560183752416211/1124339519'
+          : 'ca-app-pub-8560183752416211/1124339519',
+      listener: BannerAdListener(
+        onAdLoaded: (Ad ad) {
+          print('$BannerAd loaded.');
+          setState(() {
+            _anchoredBanner = ad as BannerAd?;
+          });
+        },
+        onAdFailedToLoad: (Ad ad, LoadAdError error) {
+          print('$BannerAd failedToLoad: $error');
+          ad.dispose();
+        },
+        onAdOpened: (Ad ad) => print('$BannerAd onAdOpened.'),
+        onAdClosed: (Ad ad) => print('$BannerAd onAdClosed.'),
+      ),
+    );
+    return banner.load();
+  }
+
+void _createInterstitialAd() {
+    InterstitialAd.load(
+        adUnitId: 'ca-app-pub-8560183752416211/7196785661',
+        request: request,
+        adLoadCallback: InterstitialAdLoadCallback(
+          onAdLoaded: (InterstitialAd ad) {
+if (appStarting) {
+appStarting=false;
+_showInterstitialAd();
+}
+            print('$ad loaded');
+            _interstitialAd = ad;
+            _numInterstitialLoadAttempts = 0;
+            _interstitialAd!.setImmersiveMode(true);
+          },
+          onAdFailedToLoad: (LoadAdError error) async {
+appStarting=false;
+            print('InterstitialAd failed to load: $error.');
+            _numInterstitialLoadAttempts += 1;
+            _interstitialAd = null;
+            if (_numInterstitialLoadAttempts <= maxFailedLoadAttempts) {
+               _createInterstitialAd();
+            }
+          },
+        ));
+  }
+
+  void _showInterstitialAd() {
+    if (_interstitialAd == null) {
+      print('Warning: attempt to show interstitial before loaded.');
+      return;
+    }
+    _interstitialAd!.fullScreenContentCallback = FullScreenContentCallback(
+      onAdShowedFullScreenContent: (InterstitialAd ad) =>
+          print('ad onAdShowedFullScreenContent.'),
+      onAdDismissedFullScreenContent: (InterstitialAd ad) async {
+        ad.dispose();
+        _createInterstitialAd();
+if (willPlay) {
+willPlay=false;
+_player.play();
+}
+      },
+      onAdFailedToShowFullScreenContent: (InterstitialAd ad, AdError error) async {
+        print('$ad onAdFailedToShowFullScreenContent: $error');
+        ad.dispose();
+        _createInterstitialAd();
+if (willPlay) {
+willPlay=false;
+_player.play();
+}
+      },
+    );
+    _interstitialAd!.show();
+    _interstitialAd = null;
   }
 
   @override
   void initState() async {
 super.initState();
+ _createInterstitialAd();
 final prefs = await SharedPreferences.getInstance();
 _index = prefs.getInt('index') ?? 0;
-    final session = await AudioSession.instance;
-    await session.configure(AudioSessionConfiguration.speech());
     _player = AudioPlayer();
         _player.playerStateStream.listen((state) {
       setState(() {
         _state = state;
       });
 if (_state!.playing) {
-Wakelock.enable();
 } else {
-Wakelock.disable();
 }
 switch (_state?.processingState) {
 case  ProcessingState.completed:
@@ -103,9 +193,12 @@ break;
     });
 getTracks();
   }
+
   @override
   void dispose() {
     _player.dispose();
+_interstitialAd?.dispose();
+_anchoredBanner?.dispose();
     super.dispose();
   }
 
@@ -142,6 +235,13 @@ locale: Locale("ar", "AE"),
         textDirection: TextDirection.rtl,
         child: Scaffold(
           appBar: AppBar(
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.only(
+                bottomRight: Radius.circular(30),
+                bottomLeft: Radius.circular(30)
+            )
+        ),
             title: Text("الوسائل المفيدة للحياة السعيدة"),
 centerTitle: true,
           ),
@@ -158,14 +258,14 @@ centerTitle: true,
                   return Card(
                     child: Padding(
                       padding: const EdgeInsets.only(
-                          top: 32, bottom: 32, left: 16, right: 16),
+                          top: 32, bottom: 32, left: 32, right: 32),
                       child: Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: <Widget>[
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: <Widget>[
-                              InkWell(
+GestureDetector(
                                 onTap: () async {
     setState(() {
 _index=index;
@@ -173,10 +273,20 @@ _index=index;
 final prefs = await SharedPreferences.getInstance();
 prefs.setInt('index', _index);
 await getTracks();
-_player.play();
+willPlay=true;
+//_player.play();
+_showInterstitialAd();
 Navigator.of(context).pop();
-                                },
-                                child: Text(newData[index]['title'],
+        const snackBar = SnackBar(content: Text('Tap'));
+ScaffoldMessenger.of(context).showSnackBar(snackBar);
+      },
+      child: Container(
+        padding: const EdgeInsets.all(12.0),
+        decoration: BoxDecoration(
+          color: Theme.of(context).buttonColor,
+          borderRadius: BorderRadius.circular(8.0),
+        ),
+        child: Text(newData[index]['title']),
 ),
 ),
                             ],
@@ -197,10 +307,8 @@ Navigator.of(context).pop();
                 children: <Widget>[
                   Row(
                     children: <Widget>[
-Container(
-width: 600,
-height: 400,
-child: SizedBox.shrink(
+Expanded(
+child: Center(
 child: Text("$title",
 textAlign: TextAlign.center,
   style: TextStyle(
@@ -323,8 +431,8 @@ position=_player.position.inSeconds;
   Widget get _pauseButton => IconButton(
                         icon: Icon(Icons.pause),
                         tooltip: "Pause",
-                        onPressed: () async {
-await _player.pause();
+                        onPressed: () {
+_player.pause();
                         },
                       );
 
@@ -332,7 +440,7 @@ await _player.pause();
                       IconButton(
                         icon: Icon(Icons.play_arrow),
                         tooltip: "Play",
-                        onPressed: () async {
+                        onPressed: () {
 _player.play();
                         },
 );
